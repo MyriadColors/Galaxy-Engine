@@ -643,16 +643,16 @@ void UI::statsWindowLogic(UpdateParameters& myParam, UpdateVariables& myVar) {
 
 	glm::vec2 selectedVel = { 0.0f, 0.0f };
 	float totalVel = 0.0f;
-
 	for (size_t i = 0; i < myParam.pParticles.size(); i++) {
 		if (myParam.rParticles[i].isSelected) {
 			selectedVel += myParam.pParticles[i].vel;
 		}
 	}
 
-	selectedVel /= myParam.pParticlesSelected.size();
-
-	totalVel = sqrt(selectedVel.x * selectedVel.x + selectedVel.y * selectedVel.y);
+	if (myParam.pParticlesSelected.size() > 0) {
+		selectedVel /= myParam.pParticlesSelected.size();
+		totalVel = sqrt(selectedVel.x * selectedVel.x + selectedVel.y * selectedVel.y);
+	}
 
 	plotLinesHelper(myVar.timeFactor, "Velocity X: ", graphHistoryLimit, selectedVel.x, -300.0f, 300.0f, graphDefaultSize);
 	ImGui::Spacing();
@@ -671,16 +671,16 @@ void UI::statsWindowLogic(UpdateParameters& myParam, UpdateVariables& myVar) {
 
 	glm::vec2 selectedAcc = { 0.0f, 0.0f };
 	float totalAcc = 0.0f;
-
 	for (size_t i = 0; i < myParam.pParticles.size(); i++) {
 		if (myParam.rParticles[i].isSelected) {
 			selectedAcc += myParam.pParticles[i].acc;
 		}
 	}
 
-	selectedAcc /= myParam.pParticlesSelected.size();
-
-	totalAcc = sqrt(selectedAcc.x * selectedAcc.x + selectedAcc.y * selectedAcc.y);
+	if (myParam.pParticlesSelected.size() > 0) {
+		selectedAcc /= myParam.pParticlesSelected.size();
+		totalAcc = sqrt(selectedAcc.x * selectedAcc.x + selectedAcc.y * selectedAcc.y);
+	}
 
 	plotLinesHelper(myVar.timeFactor, "Acceleration X: ", graphHistoryLimit, selectedAcc.x, -300.0f, 300.0f, graphDefaultSize);
 	ImGui::Spacing();
@@ -698,14 +698,15 @@ void UI::statsWindowLogic(UpdateParameters& myParam, UpdateVariables& myVar) {
 	ImGui::Spacing();
 
 	float totalPress = 0.0f;
-
 	for (size_t i = 0; i < myParam.pParticles.size(); i++) {
 		if (myParam.rParticles[i].isSelected) {
 			totalPress += myParam.pParticles[i].press;
 		}
 	}
 
-	totalPress /= myParam.pParticlesSelected.size();
+	if (myParam.pParticlesSelected.size() > 0) {
+		totalPress /= myParam.pParticlesSelected.size();
+	}
 
 	plotLinesHelper(myVar.timeFactor, "Pressure: ", graphHistoryLimit, totalPress, 0.0f, 100.0f, graphDefaultSize);
 }
@@ -717,12 +718,15 @@ void UI::plotLinesHelper(const float& timeFactor, std::string label,
 	float value, const float minValue, const float maxValue, ImVec2 size) {
 
 	auto& plotData = plotDataMap[label];
+	
+	// Always ensure plotData is properly initialized regardless of timeFactor
+	if (plotData.values.size() != length) {
+		plotData.values.resize(length, 0.0f);
+		plotData.offset = 0;
+	}
+	
+	// Only update values when time is advancing (not paused)
 	if (timeFactor > 0.0f) {
-		if (plotData.values.size() != length) {
-			plotData.values.resize(length, 0.0f);
-			plotData.offset = 0;
-		}
-
 		plotData.values[plotData.offset] = value;
 		plotData.offset = (plotData.offset + 1) % length;
 	}
