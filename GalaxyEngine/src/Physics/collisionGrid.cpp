@@ -1,109 +1,146 @@
+#include "pch.h"
 #include "Physics/collisionGrid.h"
-
 #include "parameters.h"
+
+void CollisionGrid::updateCachedRadii(const std::vector<ParticleRendering>& rParticles, 
+                                     const UpdateVariables& myVar) {
+	cachedRadii.resize(rParticles.size());
+	
+	const float radiusMultiplier = myVar.particleSizeMultiplier * myVar.particleTextureHalfSize;
+	
+	for (size_t i = 0; i < rParticles.size(); ++i) {
+		cachedRadii[i] = rParticles[i].size * radiusMultiplier;
+	}
+	needsRadiiRecalculation = false;
+}
+
+void CollisionGrid::initializeNeighborOffsets(int cellAmountX) {
+	neighborOffsets.clear();
+	neighborOffsets.reserve(9); // Maximum 9 neighbors (3x3 grid)
+	
+	for (int dx = -1; dx <= 1; ++dx) {
+		for (int dy = -1; dy <= 1; ++dy) {
+			neighborOffsets.push_back(dx + dy * cellAmountX);
+		}
+	}
+}
 
 void CollisionGrid::buildGrid(std::vector<ParticlePhysics>& pParticles, std::vector<ParticleRendering>& rParticles,
 	Physics& physics, UpdateVariables& myVar, glm::vec2& gridSize, float& dt) {
 
-	for (size_t i = 0; i < pParticles.size(); i++) {
-        // I multiply by 4 for performance. 2 is the diameter of the particle
-		float thisSize = rParticles[i].totalRadius * 4.0f;
-
-		if (thisSize > cellSize) {
-			cellSize = thisSize;
+	// OPTIMIZATION: Only recalculate cell size when needed
+	if (needsCellSizeRecalculation) {
+		float maxSize = 0.0f;
+		for (size_t i = 0; i < rParticles.size(); i++) {
+			float thisSize = rParticles[i].totalRadius * 4.0f;
+			maxSize = std::max(maxSize, thisSize);
 		}
+		cellSize = maxSize;
+		lastCellSize = cellSize;
+		needsCellSizeRecalculation = false;
+	} else {
+		cellSize = lastCellSize;
 	}
 
 	int cellAmountX = static_cast<int>(gridSize.x / cellSize);
 	int cellAmountY = static_cast<int>(gridSize.y / cellSize);
-
 	int totalCells = cellAmountX * cellAmountY;
-	std::vector<std::vector<size_t>> cellList(totalCells);
 
+	// OPTIMIZATION: Update cached radii only when needed
+	if (needsRadiiRecalculation || cachedRadii.size() != rParticles.size()) {
+		updateCachedRadii(rParticles, myVar);
+	}
+
+	// OPTIMIZATION: Initialize neighbor offsets if grid dimensions changed
+	if (lastCellAmountX != cellAmountX || neighborOffsets.empty()) {
+		initializeNeighborOffsets(cellAmountX);
+		lastCellAmountX = cellAmountX;
+		lastCellAmountY = cellAmountY;
+	}
+
+	// OPTIMIZATION: Reuse memory with flat storage structure
+	cellOffsets.assign(totalCells + 1, 0);
+	
+	// Count particles per cell
 	for (size_t i = 0; i < pParticles.size(); ++i) {
+		int xIdx = static_cast<int>(pParticles[i].pos.x / cellSize);
+		int yIdx = static_cast<int>(pParticles[i].pos.y / cellSize);
 
-		int xIdx = static_cast<int>((pParticles[i].pos.x - 0) / cellSize);
-		int yIdx = static_cast<int>((pParticles[i].pos.y - 0) / cellSize);
-
-		if (xIdx >= 0 && xIdx < cellAmountX &&
-			yIdx >= 0 && yIdx < cellAmountY) {
-
+		if (xIdx >= 0 && xIdx < cellAmountX && yIdx >= 0 && yIdx < cellAmountY) {
 			int cellId = xIdx + yIdx * cellAmountX;
-			cellList[cellId].push_back(i);
+			cellOffsets[cellId + 1]++;
 		}
 	}
 
-    //std::vector<std::mutex> particleLocks(pParticles.size());
+	// Convert counts to offsets (prefix sum)
+	for (int i = 1; i <= totalCells; ++i) {
+		cellOffsets[i] += cellOffsets[i - 1];
+	}
 
+	// Resize cellData and fill with particle indices
+	cellData.resize(cellOffsets[totalCells]);
+	std::vector<size_t> currentOffsets = cellOffsets; // Working copy
 
-    auto checkCollision = [&](size_t a, size_t b) {
-       
-        if (a == b) return;
+	for (size_t i = 0; i < pParticles.size(); ++i) {
+		int xIdx = static_cast<int>(pParticles[i].pos.x / cellSize);
+		int yIdx = static_cast<int>(pParticles[i].pos.y / cellSize);
 
-        float rA = rParticles[a].size
-            * myVar.particleSizeMultiplier
-            * myVar.particleTextureHalfSize;
-        float rB = rParticles[b].size
-            * myVar.particleSizeMultiplier
-            * myVar.particleTextureHalfSize;
+		if (xIdx >= 0 && xIdx < cellAmountX && yIdx >= 0 && yIdx < cellAmountY) {
+			int cellId = xIdx + yIdx * cellAmountX;
+			cellData[currentOffsets[cellId]++] = i;
+		}
+	}
 
-        glm::vec2 delta = pParticles[a].pos - pParticles[b].pos;
-        float distSq = delta.x * delta.x + delta.y * delta.y;
-        float sumR = rA + rB;
+	// OPTIMIZATION: Simplified collision checking lambda with cached radii
+	auto checkCollision = [&](size_t a, size_t b) {
+		if (a == b) return;
 
-        if (distSq < sumR * sumR) {
-     
-            if (a < b) {
-               // std::scoped_lock lock(particleLocks[a], particleLocks[b]);
-                physics.collisions(pParticles[a], pParticles[b],
-                    rParticles[a], rParticles[b],
-                    myVar,
-                    dt);
-            }
-            else {
-                //std::scoped_lock lock(particleLocks[b], particleLocks[a]);
-                physics.collisions(pParticles[a], pParticles[b],
-                    rParticles[a], rParticles[b],
-                    myVar,
-                    dt);
-            }
-        }
-        };
+		const float sumR = cachedRadii[a] + cachedRadii[b];
+		const glm::vec2 delta = pParticles[a].pos - pParticles[b].pos;
+		const float distSq = delta.x * delta.x + delta.y * delta.y;
 
+		if (distSq < sumR * sumR) {
+			physics.collisions(pParticles[a], pParticles[b],
+			                  rParticles[a], rParticles[b], myVar, dt);
+		}
+	};
 
-#pragma omp parallel for collapse(2) schedule(dynamic)
-    for (int x = 0; x < cellAmountX; ++x) {
-        for (int y = 0; y < cellAmountY; ++y) {
-            int baseId = x + y * cellAmountX;
-            auto& cell = cellList[baseId];
+	// OPTIMIZATION: Parallel collision detection with improved load balancing
+#pragma omp parallel for schedule(dynamic, 64)
+	for (int cellId = 0; cellId < totalCells; ++cellId) {
+		const size_t cellStart = cellOffsets[cellId];
+		const size_t cellEnd = cellOffsets[cellId + 1];
+		
+		if (cellStart == cellEnd) continue; // Skip empty cells
 
-            for (int dx = -1; dx <= 1; ++dx) {
-                for (int dy = -1; dy <= 1; ++dy) {
-                    int nx = x + dx, ny = y + dy;
-                    if (nx < 0 || ny < 0 || nx >= cellAmountX || ny >= cellAmountY)
-                        continue;
+		const int cellX = cellId % cellAmountX;
+		const int cellY = cellId / cellAmountX;
 
-                    int neighborId = nx + ny * cellAmountX;
-                    auto& other = cellList[neighborId];
+		// Check collisions within the same cell
+		for (size_t i = cellStart; i < cellEnd; ++i) {
+			for (size_t j = i + 1; j < cellEnd; ++j) {
+				checkCollision(cellData[i], cellData[j]);
+			}
+		}
 
-                    if (neighborId == baseId) {
+		// Check collisions with neighboring cells (only forward neighbors to avoid duplicates)
+		for (int dx = 0; dx <= 1; ++dx) {
+			for (int dy = (dx == 0) ? 1 : -1; dy <= 1; ++dy) {
+				const int nx = cellX + dx;
+				const int ny = cellY + dy;
+				
+				if (nx >= cellAmountX || ny < 0 || ny >= cellAmountY) continue;
 
-                        for (size_t i = 0; i < cell.size(); ++i) {
-                            for (size_t j = i + 1; j < cell.size(); ++j) {
-                                checkCollision(cell[i], cell[j]);
-                            }
-                        }
-                    }
-                    else {
+				const int neighborId = nx + ny * cellAmountX;
+				const size_t neighborStart = cellOffsets[neighborId];
+				const size_t neighborEnd = cellOffsets[neighborId + 1];
 
-                        for (size_t i : cell) {
-                            for (size_t j : other) {
-                                checkCollision(i, j);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+				for (size_t i = cellStart; i < cellEnd; ++i) {
+					for (size_t j = neighborStart; j < neighborEnd; ++j) {
+						checkCollision(cellData[i], cellData[j]);
+					}
+				}
+			}
+		}
+	}
 }
